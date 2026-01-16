@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MasterProfile } from "@/src/lib/profileSchema";
 import { mockGenerate, type TailoredResume } from "@/src/lib/mockGenerate";
 
-const PROFILE_STORAGE_KEY = "ai_resume_tailor_master_profile_v2";
+const PROFILE_STORAGE_KEY = "ai_resume_tailor_master_profile_v4";
 const JOB_STORAGE_KEY = "ai_resume_tailor_last_job_v1";
+
+/* ------------------ Types ------------------ */
 
 type JobInput = {
   jobTitle: string;
@@ -13,11 +15,20 @@ type JobInput = {
   jdText: string;
 };
 
-const emptyJob: JobInput = {
-  jobTitle: "",
-  companyWebsite: "",
-  jdText: "",
+// Extensions beyond the base schema (stored in the same JSON in localStorage)
+type ProfileExtras = {
+  certificates: { id: string; name: string; issuer?: string; year?: string; link?: string }[];
+  awards: { id: string; name: string; org?: string; year?: string; notes?: string }[];
+  extras: { id: string; label: string; value: string }[]; // e.g. Leadership, Publications, Volunteer, Interests
 };
+
+// We store profile + extras together (this is the downloadable/importable master file)
+type StoredProfile = {
+  profile: MasterProfile;
+  extras: ProfileExtras;
+};
+
+/* ------------------ Helpers ------------------ */
 
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -30,9 +41,11 @@ function csvToArr(csv: string): string[] {
     .filter(Boolean);
 }
 
-function arrToCsv(arr?: string[]): string {
+function arrToCsv(arr?: string[]) {
   return (arr ?? []).join(", ");
 }
+
+/* ------------------ Empty Objects ------------------ */
 
 const emptyProfile: MasterProfile = {
   name: "",
@@ -42,21 +55,8 @@ const emptyProfile: MasterProfile = {
   links: [],
   experience: [],
   projects: [],
-  skills: { languages: [], frameworks: [], data: [], cloud: [], tools: [], other: [] },
+  skills: [],
   education: [],
-};
-
-// Extensions beyond the base schema (stored in the same JSON in localStorage)
-type ProfileExtras = {
-  certificates: { id: string; name: string; issuer?: string; year?: string; link?: string }[];
-  awards: { id: string; name: string; org?: string; year?: string; notes?: string }[];
-  extras: { id: string; label: string; value: string }[]; // e.g. Publications, Leadership, Volunteer, Interests
-};
-
-// We store profile + extras together
-type StoredProfile = {
-  profile: MasterProfile;
-  extras: ProfileExtras;
 };
 
 const emptyExtras: ProfileExtras = {
@@ -65,9 +65,10 @@ const emptyExtras: ProfileExtras = {
   extras: [],
 };
 
-const emptyStored: StoredProfile = {
-  profile: emptyProfile,
-  extras: emptyExtras,
+const emptyJob: JobInput = {
+  jobTitle: "",
+  companyWebsite: "",
+  jdText: "",
 };
 
 export default function Home() {
@@ -76,20 +77,27 @@ export default function Home() {
   const [job, setJob] = useState<JobInput>(emptyJob);
   const [output, setOutput] = useState<TailoredResume | null>(null);
 
-  const importProfileInputRef = useRef<HTMLInputElement | null>(null);
-  const importJobInputRef = useRef<HTMLInputElement | null>(null);
+  // Draft string so commas feel normal in the textbox
+  const [skillsDraft, setSkillsDraft] = useState("");
 
-  // Load saved profile + extras on mount
+  // Profile JSON import
+  const importProfileInputRef = useRef<HTMLInputElement | null>(null);
+
+  /* ------------------ Load from localStorage ------------------ */
   useEffect(() => {
     const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
     if (raw) {
       try {
         const parsed: StoredProfile = JSON.parse(raw);
-        setProfile(parsed.profile ?? emptyProfile);
+        const loadedProfile = parsed.profile ?? emptyProfile;
+        setProfile(loadedProfile);
         setExtras(parsed.extras ?? emptyExtras);
+        setSkillsDraft(arrToCsv(loadedProfile.skills));
       } catch {
         // ignore
       }
+    } else {
+      setSkillsDraft(arrToCsv(emptyProfile.skills));
     }
 
     const rawJob = localStorage.getItem(JOB_STORAGE_KEY);
@@ -102,9 +110,12 @@ export default function Home() {
     }
   }, []);
 
+  /* ------------------ Save / Reset ------------------ */
   function saveProfile() {
-    const payload: StoredProfile = { profile, extras };
+    const profileToSave = { ...profile, skills: csvToArr(skillsDraft) };
+    const payload: StoredProfile = { profile: profileToSave, extras };
     localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(payload, null, 2));
+    setProfile(profileToSave);
   }
 
   function saveJob() {
@@ -122,29 +133,27 @@ export default function Home() {
     setProfile(emptyProfile);
     setExtras(emptyExtras);
     setJob(emptyJob);
+    setSkillsDraft("");
     setOutput(null);
     localStorage.removeItem(PROFILE_STORAGE_KEY);
     localStorage.removeItem(JOB_STORAGE_KEY);
   }
 
+  /* ------------------ Profile JSON Download / Upload ------------------ */
+
   function downloadProfileJson() {
-    const payload: StoredProfile = { profile, extras };
+    // Always export normalized skills array
+    const profileToExport = { ...profile, skills: csvToArr(skillsDraft) };
+    const payload: StoredProfile = { profile: profileToExport, extras };
+
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
+
     const a = document.createElement("a");
     a.href = url;
     a.download = "ai_resume_tailor_master_profile.json";
     a.click();
-    URL.revokeObjectURL(url);
-  }
 
-  function downloadJobJson() {
-    const blob = new Blob([JSON.stringify(job, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "ai_resume_tailor_job_input.json";
-    a.click();
     URL.revokeObjectURL(url);
   }
 
@@ -152,18 +161,23 @@ export default function Home() {
     importProfileInputRef.current?.click();
   }
 
-  function triggerImportJob() {
-    importJobInputRef.current?.click();
-  }
-
   function onImportProfileFile(file: File) {
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const parsed: StoredProfile = JSON.parse(String(reader.result));
-        setProfile(parsed.profile ?? emptyProfile);
+        const loadedProfile = parsed.profile ?? emptyProfile;
+
+        setProfile(loadedProfile);
         setExtras(parsed.extras ?? emptyExtras);
-        localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(parsed, null, 2));
+        setSkillsDraft(arrToCsv(loadedProfile.skills ?? []));
+
+        // persist immediately
+        localStorage.setItem(
+          PROFILE_STORAGE_KEY,
+          JSON.stringify({ profile: loadedProfile, extras: parsed.extras ?? emptyExtras }, null, 2)
+        );
+
         alert("Imported master profile ✅");
       } catch {
         alert("Import failed: invalid JSON.");
@@ -172,29 +186,21 @@ export default function Home() {
     reader.readAsText(file);
   }
 
-  function onImportJobFile(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed: JobInput = JSON.parse(String(reader.result));
-        setJob(parsed ?? emptyJob);
-        localStorage.setItem(JOB_STORAGE_KEY, JSON.stringify(parsed, null, 2));
-        alert("Imported job input ✅");
-      } catch {
-        alert("Import failed: invalid JSON.");
-      }
-    };
-    reader.readAsText(file);
-  }
-
+  /* ------------------ Generate ------------------ */
   function onGenerate() {
-    // Persist what we have, then generate
-    saveProfile();
-    saveJob();
-    setOutput(mockGenerate(profile, job.jdText));
+    // Save everything, then generate
+    const profileForGen = { ...profile, skills: csvToArr(skillsDraft) };
+    localStorage.setItem(
+      PROFILE_STORAGE_KEY,
+      JSON.stringify({ profile: profileForGen, extras }, null, 2)
+    );
+    localStorage.setItem(JOB_STORAGE_KEY, JSON.stringify(job, null, 2));
+
+    setProfile(profileForGen);
+    setOutput(mockGenerate(profileForGen, job.jdText));
   }
 
-  // ---------- Experience helpers ----------
+  /* ------------------ Experience helpers ------------------ */
   function addExperience() {
     setProfile({
       ...profile,
@@ -253,7 +259,7 @@ export default function Home() {
     });
   }
 
-  // ---------- Project helpers ----------
+  /* ------------------ Project helpers ------------------ */
   function addProject() {
     setProfile({
       ...profile,
@@ -310,7 +316,7 @@ export default function Home() {
     });
   }
 
-  // ---------- Education helpers ----------
+  /* ------------------ Education helpers ------------------ */
   function addEducation() {
     setProfile({
       ...profile,
@@ -324,7 +330,7 @@ export default function Home() {
           endDate: "",
           gpa: "",
           notes: "",
-        },
+        } as any,
         ...profile.education,
       ],
     });
@@ -341,7 +347,7 @@ export default function Home() {
     setProfile({ ...profile, education: profile.education.filter((e) => e.id !== eduId) });
   }
 
-  // ---------- Certificates / Awards / Extras ----------
+  /* ------------------ Certificates / Awards / Extras ------------------ */
   function addCertificate() {
     setExtras({
       ...extras,
@@ -399,20 +405,6 @@ export default function Home() {
     setExtras({ ...extras, extras: extras.extras.filter((x) => x.id !== extraId) });
   }
 
-  // Skills CSV
-  const s = profile.skills;
-  const skillsCsv = useMemo(
-    () => ({
-      languages: arrToCsv(s.languages),
-      frameworks: arrToCsv(s.frameworks),
-      data: arrToCsv(s.data),
-      cloud: arrToCsv(s.cloud),
-      tools: arrToCsv(s.tools),
-      other: arrToCsv(s.other),
-    }),
-    [s]
-  );
-
   return (
     <main className="min-h-screen bg-white text-black">
       <div className="mx-auto max-w-6xl p-6">
@@ -441,23 +433,9 @@ export default function Home() {
 
             <button
               className="rounded-lg border border-gray-200 px-4 py-2 text-sm hover:bg-gray-50"
-              onClick={downloadJobJson}
-            >
-              Download Job JSON
-            </button>
-
-            <button
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm hover:bg-gray-50"
               onClick={triggerImportProfile}
             >
               Import Profile JSON
-            </button>
-
-            <button
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm hover:bg-gray-50"
-              onClick={triggerImportJob}
-            >
-              Import Job JSON
             </button>
 
             <button
@@ -475,18 +453,6 @@ export default function Home() {
               onChange={(e) => {
                 const f = e.target.files?.[0];
                 if (f) onImportProfileFile(f);
-                e.currentTarget.value = "";
-              }}
-            />
-
-            <input
-              ref={importJobInputRef}
-              type="file"
-              accept="application/json"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) onImportJobFile(f);
                 e.currentTarget.value = "";
               }}
             />
@@ -533,27 +499,25 @@ export default function Home() {
 
             {/* Skills */}
             <h3 className="mt-6 text-sm font-semibold text-gray-700">Skills</h3>
-            <div className="grid grid-cols-2 gap-3">
-              {(["languages", "frameworks", "data", "cloud", "tools", "other"] as const).map((k) => (
-                <input
-                  key={k}
-                  className="w-full rounded-lg border border-gray-300 p-2 text-sm"
-                  value={skillsCsv[k]}
-                  onChange={(e) =>
-                    setProfile({
-                      ...profile,
-                      skills: { ...profile.skills, [k]: csvToArr(e.target.value) },
-                    })
-                  }
-                  placeholder={`${k} (comma-separated)`}
-                />
-              ))}
-            </div>
+            <input
+              className="mt-2 w-full rounded-lg border border-gray-300 p-2 text-sm"
+              value={skillsDraft}
+              onChange={(e) => setSkillsDraft(e.target.value)}
+              onBlur={() => {
+                const arr = csvToArr(skillsDraft);
+                setProfile({ ...profile, skills: arr });
+                setSkillsDraft(arrToCsv(arr)); // normalize spacing
+              }}
+              placeholder="Skills (comma-separated) e.g. Python, SQL, Spark, AWS, Docker"
+            />
 
             {/* Experience */}
             <div className="mt-6 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-700">Experience</h3>
-              <button className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50" onClick={addExperience}>
+              <button
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                onClick={addExperience}
+              >
                 + Add role
               </button>
             </div>
@@ -637,273 +601,308 @@ export default function Home() {
             {/* Projects */}
             <div className="mt-6 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-700">Projects</h3>
-              <button className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50" onClick={addProject}>
+              <button
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                onClick={addProject}
+              >
                 + Add project
               </button>
             </div>
 
             <div className="mt-3 space-y-4">
-              {profile.projects.map((p) => (
-                <div key={p.id} className="rounded-xl border border-gray-200 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">Project</p>
-                    <button
-                      className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
-                      onClick={() => removeProject(p.id)}
-                    >
-                      Remove
-                    </button>
-                  </div>
+              {profile.projects.length === 0 ? (
+                <p className="text-sm text-gray-600">No projects yet. Click “Add project”.</p>
+              ) : (
+                profile.projects.map((p) => (
+                  <div key={p.id} className="rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">Project</p>
+                      <button
+                        className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+                        onClick={() => removeProject(p.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
 
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={p.name}
-                      onChange={(ev) => updateProject(p.id, { name: ev.target.value })}
-                      placeholder="Project name"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={p.link ?? ""}
-                      onChange={(ev) => updateProject(p.id, { link: ev.target.value })}
-                      placeholder="Link (optional)"
-                    />
-                  </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={p.name}
+                        onChange={(ev) => updateProject(p.id, { name: ev.target.value })}
+                        placeholder="Project name"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={p.link ?? ""}
+                        onChange={(ev) => updateProject(p.id, { link: ev.target.value })}
+                        placeholder="Link (optional)"
+                      />
+                    </div>
 
-                  <div className="mt-3 flex items-center justify-between">
-                    <p className="text-sm font-medium">Bullets</p>
-                    <button
-                      className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
-                      onClick={() => addProjectBullet(p.id)}
-                    >
-                      + Add bullet
-                    </button>
-                  </div>
+                    <div className="mt-3 flex items-center justify-between">
+                      <p className="text-sm font-medium">Bullets</p>
+                      <button
+                        className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                        onClick={() => addProjectBullet(p.id)}
+                      >
+                        + Add bullet
+                      </button>
+                    </div>
 
-                  <div className="mt-2 space-y-2">
-                    {p.bullets.map((b) => (
-                      <div key={b.id} className="flex gap-2">
-                        <input
-                          className="w-full rounded-lg border border-gray-300 p-2 text-sm"
-                          value={b.text}
-                          onChange={(ev) => updateProjectBullet(p.id, b.id, ev.target.value)}
-                          placeholder="Bullet: what you built + tech + result"
-                        />
-                        <button
-                          className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
-                          onClick={() => removeProjectBullet(p.id, b.id)}
-                        >
-                          X
-                        </button>
-                      </div>
-                    ))}
+                    <div className="mt-2 space-y-2">
+                      {p.bullets.map((b) => (
+                        <div key={b.id} className="flex gap-2">
+                          <input
+                            className="w-full rounded-lg border border-gray-300 p-2 text-sm"
+                            value={b.text}
+                            onChange={(ev) => updateProjectBullet(p.id, b.id, ev.target.value)}
+                            placeholder="Bullet: what you built + tech + result"
+                          />
+                          <button
+                            className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+                            onClick={() => removeProjectBullet(p.id, b.id)}
+                          >
+                            X
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Education */}
             <div className="mt-6 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-700">Education</h3>
-              <button className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50" onClick={addEducation}>
+              <button
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                onClick={addEducation}
+              >
                 + Add education
               </button>
             </div>
 
             <div className="mt-3 space-y-4">
-              {profile.education.map((e) => (
-                <div key={e.id} className="rounded-xl border border-gray-200 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">Education</p>
-                    <button
-                      className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
-                      onClick={() => removeEducation(e.id)}
-                    >
-                      Remove
-                    </button>
-                  </div>
+              {profile.education.length === 0 ? (
+                <p className="text-sm text-gray-600">No education yet. Click “Add education”.</p>
+              ) : (
+                profile.education.map((e) => (
+                  <div key={e.id} className="rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">Education</p>
+                      <button
+                        className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+                        onClick={() => removeEducation(e.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
 
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={e.school}
-                      onChange={(ev) => updateEducation(e.id, { school: ev.target.value })}
-                      placeholder="School"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={e.degree ?? ""}
-                      onChange={(ev) => updateEducation(e.id, { degree: ev.target.value })}
-                      placeholder="Degree"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={e.major ?? ""}
-                      onChange={(ev) => updateEducation(e.id, { major: ev.target.value })}
-                      placeholder="Major"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={e.endDate ?? ""}
-                      onChange={(ev) => updateEducation(e.id, { endDate: ev.target.value })}
-                      placeholder="Grad year"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={(e as any).gpa ?? ""}
-                      onChange={(ev) => updateEducation(e.id, { gpa: ev.target.value })}
-                      placeholder="GPA (optional)"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={(e as any).notes ?? ""}
-                      onChange={(ev) => updateEducation(e.id, { notes: ev.target.value })}
-                      placeholder="Notes (optional)"
-                    />
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={(e as any).school ?? ""}
+                        onChange={(ev) => updateEducation(e.id, { school: ev.target.value })}
+                        placeholder="School"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={(e as any).degree ?? ""}
+                        onChange={(ev) => updateEducation(e.id, { degree: ev.target.value })}
+                        placeholder="Degree"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={(e as any).major ?? ""}
+                        onChange={(ev) => updateEducation(e.id, { major: ev.target.value })}
+                        placeholder="Major"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={(e as any).endDate ?? ""}
+                        onChange={(ev) => updateEducation(e.id, { endDate: ev.target.value })}
+                        placeholder="Grad year"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={(e as any).gpa ?? ""}
+                        onChange={(ev) => updateEducation(e.id, { gpa: ev.target.value })}
+                        placeholder="GPA (optional)"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={(e as any).notes ?? ""}
+                        onChange={(ev) => updateEducation(e.id, { notes: ev.target.value })}
+                        placeholder="Notes (optional)"
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Certificates */}
             <div className="mt-6 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-700">Certificates</h3>
-              <button className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50" onClick={addCertificate}>
+              <button
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                onClick={addCertificate}
+              >
                 + Add certificate
               </button>
             </div>
 
             <div className="mt-3 space-y-4">
-              {extras.certificates.map((c) => (
-                <div key={c.id} className="rounded-xl border border-gray-200 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">Certificate</p>
-                    <button
-                      className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
-                      onClick={() => removeCertificate(c.id)}
-                    >
-                      Remove
-                    </button>
-                  </div>
+              {extras.certificates.length === 0 ? (
+                <p className="text-sm text-gray-600">No certificates yet. Click “Add certificate”.</p>
+              ) : (
+                extras.certificates.map((c) => (
+                  <div key={c.id} className="rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">Certificate</p>
+                      <button
+                        className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+                        onClick={() => removeCertificate(c.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
 
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={c.name}
-                      onChange={(ev) => updateCertificate(c.id, { name: ev.target.value })}
-                      placeholder="Certificate name"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={c.issuer ?? ""}
-                      onChange={(ev) => updateCertificate(c.id, { issuer: ev.target.value })}
-                      placeholder="Issuer (e.g., AWS, Coursera)"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={c.year ?? ""}
-                      onChange={(ev) => updateCertificate(c.id, { year: ev.target.value })}
-                      placeholder="Year (optional)"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={c.link ?? ""}
-                      onChange={(ev) => updateCertificate(c.id, { link: ev.target.value })}
-                      placeholder="Link (optional)"
-                    />
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={c.name}
+                        onChange={(ev) => updateCertificate(c.id, { name: ev.target.value })}
+                        placeholder="Certificate name"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={c.issuer ?? ""}
+                        onChange={(ev) => updateCertificate(c.id, { issuer: ev.target.value })}
+                        placeholder="Issuer (e.g., AWS, Coursera)"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={c.year ?? ""}
+                        onChange={(ev) => updateCertificate(c.id, { year: ev.target.value })}
+                        placeholder="Year (optional)"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={c.link ?? ""}
+                        onChange={(ev) => updateCertificate(c.id, { link: ev.target.value })}
+                        placeholder="Link (optional)"
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Awards */}
             <div className="mt-6 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-700">Awards</h3>
-              <button className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50" onClick={addAward}>
+              <button
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                onClick={addAward}
+              >
                 + Add award
               </button>
             </div>
 
             <div className="mt-3 space-y-4">
-              {extras.awards.map((a) => (
-                <div key={a.id} className="rounded-xl border border-gray-200 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">Award</p>
-                    <button
-                      className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
-                      onClick={() => removeAward(a.id)}
-                    >
-                      Remove
-                    </button>
-                  </div>
+              {extras.awards.length === 0 ? (
+                <p className="text-sm text-gray-600">No awards yet. Click “Add award”.</p>
+              ) : (
+                extras.awards.map((a) => (
+                  <div key={a.id} className="rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">Award</p>
+                      <button
+                        className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+                        onClick={() => removeAward(a.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
 
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={a.name}
-                      onChange={(ev) => updateAward(a.id, { name: ev.target.value })}
-                      placeholder="Award name"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={a.org ?? ""}
-                      onChange={(ev) => updateAward(a.id, { org: ev.target.value })}
-                      placeholder="Organization (optional)"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={a.year ?? ""}
-                      onChange={(ev) => updateAward(a.id, { year: ev.target.value })}
-                      placeholder="Year (optional)"
-                    />
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={a.notes ?? ""}
-                      onChange={(ev) => updateAward(a.id, { notes: ev.target.value })}
-                      placeholder="Notes (optional)"
-                    />
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={a.name}
+                        onChange={(ev) => updateAward(a.id, { name: ev.target.value })}
+                        placeholder="Award name"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={a.org ?? ""}
+                        onChange={(ev) => updateAward(a.id, { org: ev.target.value })}
+                        placeholder="Organization (optional)"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={a.year ?? ""}
+                        onChange={(ev) => updateAward(a.id, { year: ev.target.value })}
+                        placeholder="Year (optional)"
+                      />
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={a.notes ?? ""}
+                        onChange={(ev) => updateAward(a.id, { notes: ev.target.value })}
+                        placeholder="Notes (optional)"
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Extras */}
             <div className="mt-6 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-700">Other Resume Sections</h3>
-              <button className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50" onClick={addExtra}>
+              <button
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs hover:bg-gray-50"
+                onClick={addExtra}
+              >
                 + Add section
               </button>
             </div>
 
             <div className="mt-3 space-y-4">
-              {extras.extras.map((x) => (
-                <div key={x.id} className="rounded-xl border border-gray-200 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">Section</p>
-                    <button
-                      className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
-                      onClick={() => removeExtra(x.id)}
-                    >
-                      Remove
-                    </button>
-                  </div>
+              {extras.extras.length === 0 ? (
+                <p className="text-sm text-gray-600">No sections yet. Click “Add section”.</p>
+              ) : (
+                extras.extras.map((x) => (
+                  <div key={x.id} className="rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">Section</p>
+                      <button
+                        className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+                        onClick={() => removeExtra(x.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
 
-                  <div className="mt-2 grid gap-2">
-                    <input
-                      className="rounded-lg border border-gray-300 p-2 text-sm"
-                      value={x.label}
-                      onChange={(ev) => updateExtra(x.id, { label: ev.target.value })}
-                      placeholder="Label (e.g., Leadership, Volunteer, Publications, Interests)"
-                    />
-                    <textarea
-                      className="h-20 rounded-lg border border-gray-300 p-2 text-sm"
-                      value={x.value}
-                      onChange={(ev) => updateExtra(x.id, { value: ev.target.value })}
-                      placeholder="Content (keep it short; can be bullets separated by new lines)"
-                    />
+                    <div className="mt-2 grid gap-2">
+                      <input
+                        className="rounded-lg border border-gray-300 p-2 text-sm"
+                        value={x.label}
+                        onChange={(ev) => updateExtra(x.id, { label: ev.target.value })}
+                        placeholder="Label (e.g., Leadership, Volunteer, Publications, Interests)"
+                      />
+                      <textarea
+                        className="h-20 rounded-lg border border-gray-300 p-2 text-sm"
+                        value={x.value}
+                        onChange={(ev) => updateExtra(x.id, { value: ev.target.value })}
+                        placeholder="Content (short; can be bullets separated by new lines)"
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </section>
 
@@ -948,9 +947,7 @@ export default function Home() {
               <h3 className="text-sm font-semibold">Output Preview</h3>
 
               {!output ? (
-                <p className="mt-2 text-sm text-gray-600">
-                  Click Generate to see a tailored resume preview.
-                </p>
+                <p className="mt-2 text-sm text-gray-600">Click Generate to see a tailored resume preview.</p>
               ) : (
                 <div className="mt-3 space-y-3">
                   <div>
